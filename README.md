@@ -6,12 +6,19 @@ Usage
 Before running the script, you will need to provide the following parameters:
 
 -schema: the name of the schema to lock tables in (required)
+
 -max-connect: the maximum number of connections to the database (default: 50)
+
 -host: the database host (required)
+
 -port: the database port (required)
+
 -user: the database user (required)
+
 -password: the database password (required)
+
 -db: the database name (required)
+
 Once you have provided the necessary parameters, you can run the script with the following command:
 
 
