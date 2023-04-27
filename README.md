@@ -1,4 +1,5 @@
 Table Locking Script
+
 This script is used to lock all tables in a specified schema in a PostgreSQL database.
 
 Usage
