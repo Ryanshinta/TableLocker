@@ -16,6 +16,7 @@ Before running the script, you will need to provide the following parameters:
 Once you have provided the necessary parameters, you can run the script with the following command:
 ````
 $ go build TableLocker.go
+$ ./TableLockerV0.67 -schema=schema -max-connect=50 -host=localhost -port=5432 -user=postgres -password=123456 -db=postgres
 ````
 
 
