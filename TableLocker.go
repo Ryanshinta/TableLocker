@@ -3,13 +3,16 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"flag"
 	"fmt"
+	"github.com/TwiN/go-color"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
+	_ "github.com/TwiN/go-color"
 	_ "github.com/lib/pq"
 )
 
@@ -17,6 +20,16 @@ import (
 Author: Ryan Ouyang
 27/04/2023
 */
+
+var errTimeout = errors.New("Error: Timeout")
+
+type SchemaTable struct {
+	Schema string
+	Table  string
+}
+
+var schemaTables []SchemaTable
+
 func main() {
 
 	var (
@@ -58,6 +71,7 @@ func main() {
 	// Max Connection
 	db.SetMaxOpenConns(maxConnect)
 	db.SetMaxIdleConns(maxConnect)
+	db.SetConnMaxLifetime(24 * time.Hour)
 
 	// Schema
 	rows, err := db.Query("SELECT table_name FROM information_schema.tables WHERE table_schema = $1", schema)
@@ -74,21 +88,45 @@ func main() {
 		os.Exit(1)
 	}
 	defer tx.Rollback()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 24*time.Hour)
+	defer cancel()
+
 	for rows.Next() {
 		var tableName string
 		if err := rows.Scan(&tableName); err != nil {
 			fmt.Fprintf(os.Stderr, "Error scanning table name: %v\n", err)
 			os.Exit(1)
 		}
-		_, err = tx.Exec("LOCK TABLE " + schema + "." + tableName + " IN EXCLUSIVE MODE")
-		fmt.Printf("Table %s locked.\n", schema+"."+tableName)
+		//		_, err = tx.Exec("LOCK TABLE " + schema + "." + tableName + " IN EXCLUSIVE MODE")
+		//		fmt.Printf("Table %s locked.\n", schema+"."+tableName)
+
+		err := lockTableWithTimeout(ctx, tx, schema, tableName)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error locking table %s: %v\n", tableName, err)
-			os.Exit(1)
+			switch {
+			case errors.Is(err, errTimeout):
+
+				fmt.Fprintf(os.Stderr, "Error lock table %s: %v timeout\n", tableName, err)
+				schemaTables = append(schemaTables, SchemaTable{schema, tableName})
+
+			default:
+				fmt.Fprintf(os.Stderr, "Error locking table %s: %v\n", tableName, err)
+				os.Exit(1)
+			}
+		} else {
+			fmt.Printf("Table %s locked.\n", schema+"."+tableName)
 		}
+
 	}
 	lockDuration := time.Since(lockStart)
 	fmt.Printf("All Table locked in %v.\n", lockDuration)
+	if len(schemaTables) != 0 {
+		fmt.Println(color.Ize(color.Red, "Following table cannot lock, rerun after 5sec"))
+		for _, schemaTable := range schemaTables {
+			fmt.Println(color.Ize(color.Red, schemaTable.Schema+"."+schemaTable.Table))
+		}
+		time.Sleep(5 * time.Second)
+	}
 	// Releasing
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT)
@@ -104,4 +142,27 @@ func main() {
 	for {
 		time.Sleep(time.Second)
 	}
+}
+
+func lockTableWithTimeout(ctx context.Context, tx *sql.Tx, schemaName string, tableName string) error {
+
+	query := "LOCK TABLE " + schemaName + "." + tableName + " IN EXCLUSIVE MODE"
+
+	done := make(chan error, 1)
+
+	go func() {
+		_, err := tx.Exec(query)
+
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(5 * time.Second):
+		return errTimeout // Timeout expired, return without an error
+	case <-ctx.Done():
+		return ctx.Err() // Context cancelled, return the error
+	}
+
 }
