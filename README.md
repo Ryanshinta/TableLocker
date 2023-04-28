@@ -12,7 +12,7 @@ Before running the script, you will need to provide the following parameters:
 * -user: the database user (required)
 * -password: the database password (required)
 * -db: the database name (required)
-* -mode: the lock mode (required) 
+* -mode: the lock mode (**todo**) 
   * SHARE 
   * EXCLUSIVE 
   * ACCESS (ACCESS EXCLUSIVE) 
