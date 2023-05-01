@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"github.com/TwiN/go-color"
+	"log"
 	"os"
 	"os/signal"
 	"syscall"
@@ -51,20 +52,17 @@ func main() {
 	flag.Parse()
 
 	if schema == "" {
-		fmt.Fprintf(os.Stderr, "Error: schema name is required\n")
-		os.Exit(1)
+		log.Fatalln("Error: schema name is required")
 	}
 
 	if dbHost == "" || dbPort == 0 || dbUser == "" || dbPassword == "" || dbName == "" {
-		fmt.Fprintf(os.Stderr, "Error: database connection parameters are required\n")
-		os.Exit(1)
+		log.Fatalln("Error: database connection parameters are required")
 	}
 	lockStart := time.Now()
 	// Create Connection
 	db, err := sql.Open("postgres", fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=disable", dbHost, dbPort, dbUser, dbPassword, dbName))
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error connecting to database: %v\n", err)
-		os.Exit(1)
+		log.Fatalf("Error connecting to database: %v\n", err)
 	}
 	defer db.Close()
 
@@ -76,16 +74,14 @@ func main() {
 	// Schema
 	rows, err := db.Query("SELECT table_name FROM information_schema.tables WHERE table_schema = $1", schema)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error querying tables: %v\n", err)
-		os.Exit(1)
+		log.Fatalf("Error querying tables: %v\n", err)
 	}
 	defer rows.Close()
 
 	// Start Lock
 	tx, err := db.BeginTx(context.Background(), nil)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error starting transaction: %v\n", err)
-		os.Exit(1)
+		log.Fatalf("Error starting transaction: %v\n", err)
 	}
 	defer tx.Rollback()
 
@@ -95,50 +91,54 @@ func main() {
 	for rows.Next() {
 		var tableName string
 		if err := rows.Scan(&tableName); err != nil {
-			fmt.Fprintf(os.Stderr, "Error scanning table name: %v\n", err)
-			os.Exit(1)
+			log.Fatalf("Error scanning table name: %v\n", err)
 		}
-		//		_, err = tx.Exec("LOCK TABLE " + schema + "." + tableName + " IN EXCLUSIVE MODE")
-		//		fmt.Printf("Table %s locked.\n", schema+"."+tableName)
 
 		err := lockTableWithTimeout(ctx, tx, schema, tableName)
 		if err != nil {
 			switch {
 			case errors.Is(err, errTimeout):
-
-				fmt.Fprintf(os.Stderr, "Error lock table %s: %v timeout\n", tableName, err)
-				schemaTables = append(schemaTables, SchemaTable{schema, tableName})
+				log.Printf("Error lock table %s: %v timeout\n", tableName, err)
 
 			default:
-				fmt.Fprintf(os.Stderr, "Error locking table %s: %v\n", tableName, err)
-				os.Exit(1)
+				log.Fatalf("Error locking table %s: %v\n", tableName, err)
 			}
 		} else {
-			fmt.Printf("Table %s locked.\n", schema+"."+tableName)
+			log.Printf("Table %s locked.\n", schema+"."+tableName)
 		}
-
 	}
 	lockDuration := time.Since(lockStart)
-	fmt.Printf("All Table locked in %v.\n", lockDuration)
-	if len(schemaTables) != 0 {
-		fmt.Println(color.Ize(color.Red, "Following table cannot lock, rerun after 5sec"))
-		for _, schemaTable := range schemaTables {
-			fmt.Println(color.Ize(color.Red, schemaTable.Schema+"."+schemaTable.Table))
+	log.Printf("All Table locked in %v.\n", lockDuration)
+
+	for true {
+		if len(schemaTables) != 0 {
+			log.Println(color.Ize(color.Red, "Following table lock failed, rerun after 5sec"))
+			for _, schemaTable := range schemaTables {
+				log.Println(color.Ize(color.Red, schemaTable.Schema+"."+schemaTable.Table))
+			}
+
+			time.Sleep(5 * time.Second)
+			for _, schemaTable := range schemaTables {
+				schemaTables = schemaTables[1:] //remove first one
+				lockTableWithTimeout(ctx, tx, schemaTable.Schema, schemaTable.Table)
+			}
+		} else {
+			break
 		}
-		time.Sleep(5 * time.Second)
 	}
+
 	// Releasing
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT)
 	go func() {
 		<-sig
-		fmt.Println("Received SIGINT, releasing table locks...")
+		log.Println("Received SIGINT, releasing table locks...")
 		tx.Rollback()
 		os.Exit(1)
 	}()
 
 	// Exit
-	fmt.Printf("Locked tables in schema %s, press Ctrl+C to release...\n", schema)
+	log.Printf("Locked tables in schema %s, press Ctrl+C to release...\n", schema)
 	for {
 		time.Sleep(time.Second)
 	}
@@ -146,7 +146,7 @@ func main() {
 
 func lockTableWithTimeout(ctx context.Context, tx *sql.Tx, schemaName string, tableName string) error {
 
-	query := "LOCK TABLE " + schemaName + "." + tableName + " IN EXCLUSIVE MODE"
+	query := "LOCK TABLE " + schemaName + "." + tableName + " IN SHARE ROW EXCLUSIVE MODE"
 
 	done := make(chan error, 1)
 
@@ -160,9 +160,10 @@ func lockTableWithTimeout(ctx context.Context, tx *sql.Tx, schemaName string, ta
 	case err := <-done:
 		return err
 	case <-time.After(5 * time.Second):
-		return errTimeout // Timeout expired, return without an error
+		schemaTables = append(schemaTables, SchemaTable{schemaName, tableName})
+		return errTimeout
 	case <-ctx.Done():
-		return ctx.Err() // Context cancelled, return the error
+		return ctx.Err()
 	}
 
 }
