@@ -152,7 +152,6 @@ func lockTableWithTimeout(ctx context.Context, tx *sql.Tx, schemaName string, ta
 
 	go func() {
 		_, err := tx.Exec(query)
-
 		done <- err
 	}()
 
