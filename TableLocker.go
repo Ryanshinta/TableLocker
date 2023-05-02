@@ -6,12 +6,13 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"github.com/TwiN/go-color"
 	"log"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
+
+	"github.com/TwiN/go-color"
 
 	_ "github.com/TwiN/go-color"
 	_ "github.com/lib/pq"
@@ -93,24 +94,30 @@ func main() {
 		if err := rows.Scan(&tableName); err != nil {
 			log.Fatalf("Error scanning table name: %v\n", err)
 		}
+		isTableLock := checkTableLockStatus(tx, schema, tableName)
 
-		err := lockTableWithTimeout(ctx, tx, schema, tableName)
-		if err != nil {
-			switch {
-			case errors.Is(err, errTimeout):
-				log.Printf("Error lock table %s: %v timeout\n", tableName, err)
-
-			default:
-				log.Fatalf("Error locking table %s: %v\n", tableName, err)
-			}
+		if isTableLock {
+			schemaTables = append(schemaTables, SchemaTable{schema, tableName})
 		} else {
-			log.Printf("Table %s locked.\n", schema+"."+tableName)
+			err := lockTableWithTimeout(ctx, tx, schema, tableName)
+			if err != nil {
+				switch {
+				case errors.Is(err, errTimeout):
+					log.Printf("Error lock table %s: %v timeout\n", tableName, err)
+
+				default:
+					log.Fatalf("Error locking table %s: %v\n", tableName, err)
+				}
+			} else {
+				log.Printf("Table %s locked.\n", schema+"."+tableName)
+			}
 		}
+
 	}
 	lockDuration := time.Since(lockStart)
 	log.Printf("All Table locked in %v.\n", lockDuration)
 
-	for true {
+	for {
 		if len(schemaTables) != 0 {
 			log.Println(color.Ize(color.Red, "Following table lock failed, rerun after 5sec"))
 			for _, schemaTable := range schemaTables {
@@ -146,10 +153,8 @@ func main() {
 
 func lockTableWithTimeout(ctx context.Context, tx *sql.Tx, schemaName string, tableName string) error {
 
-	query := "LOCK TABLE " + schemaName + "." + tableName + " IN SHARE ROW EXCLUSIVE MODE"
-
+	query := "LOCK TABLE " + schemaName + "." + tableName + " IN SHARE MODE"
 	done := make(chan error, 1)
-
 	go func() {
 		_, err := tx.Exec(query)
 		done <- err
@@ -159,10 +164,32 @@ func lockTableWithTimeout(ctx context.Context, tx *sql.Tx, schemaName string, ta
 	case err := <-done:
 		return err
 	case <-time.After(5 * time.Second):
-		schemaTables = append(schemaTables, SchemaTable{schemaName, tableName})
 		return errTimeout
 	case <-ctx.Done():
 		return ctx.Err()
 	}
 
+}
+
+func checkTableLockStatus(tx *sql.Tx, schemaName string, tableName string) bool {
+
+	query := "SELECT * FROM pg_locks WHERE relation::regclass::text = '" + schemaName + "." + tableName
+
+	r, err := tx.Exec(query)
+
+	if err != nil {
+		log.Fatalln("Error Query: %v\n", err)
+	}
+
+	i, err := r.RowsAffected()
+
+	if err != nil {
+		log.Fatalln("Error Query: %v\n", err)
+	}
+
+	if i == 0 {
+		return false
+	} else {
+		return true
+	}
 }
